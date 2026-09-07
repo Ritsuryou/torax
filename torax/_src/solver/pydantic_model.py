@@ -271,6 +271,7 @@ class OptimizerThetaMethod(BaseSolver):
     )
 
 
-SolverConfig = (
-    LinearThetaMethod | NewtonRaphsonThetaMethod | OptimizerThetaMethod
-)
+SolverConfig = Annotated[
+    LinearThetaMethod | NewtonRaphsonThetaMethod | OptimizerThetaMethod,
+    pydantic.Discriminator('solver_type'),
+]

@@ -78,9 +78,7 @@ class ToraxConfig(torax_pydantic.BaseModelFrozen):
   neoclassical: neoclassical_pydantic_model.Neoclassical = (
       neoclassical_pydantic_model.Neoclassical()  # pylint: disable=missing-kwoa  # pyrefly: ignore[missing-argument]
   )
-  solver: solver_pydantic_model.SolverConfig = pydantic.Field(
-      discriminator='solver_type'
-  )
+  solver: solver_pydantic_model.SolverConfig = pydantic.Field()
   transport: transport_model_pydantic_model.TransportModel = (
       pydantic.Field()
   )
