@@ -3,10 +3,20 @@
 Simulation output structure
 ###########################
 
-TORAX file output is written to a ``state_history.nc`` netCDF file. If running
-with the ``run_simulation_main.py`` or ``run_torax`` script, the ``output_dir``
-is set via flag ``--output_dir``, with default
-``/tmp/torax_results_<YYYYMMDD_HHMMSS>/``.
+TORAX file output can be written to a NetCDF file. If running with the
+``run_simulation_main.py`` or ``run_torax`` CLI script, output is saved to
+``state_history_<timestamp>.nc`` in the directory set via the ``--output_dir``
+flag (defaulting to ``/tmp/torax_results/``).
+
+When running TORAX programmatically via ``torax.run_simulation()``, outputs
+are returned directly in memory as an ``xarray.DataTree`` rather than written to
+disk automatically. To save them to disk at a specific path, use the
+``to_netcdf()`` method:
+
+.. code-block:: python
+
+  data_tree.to_netcdf('path/to/my_output/state_history.nc')
+
 
 We currently support the below output structure for Torax V1.
 

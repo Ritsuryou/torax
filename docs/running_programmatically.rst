@@ -34,8 +34,24 @@ We can then run the simulation:
   # Example below shows how to access the fusion gain at time=2 seconds.
   Q_fusion_t2 = data_tree.scalars.Q_fusion.sel(time=2, method='nearest')
 
+Saving simulation output to disk
+################################
+
+When running TORAX programmatically with ``torax.run_simulation``, simulation
+outputs are returned in memory as an ``xarray.DataTree`` and are not
+automatically written to disk.
+
+To save the simulation output to a NetCDF file (e.g., ``state_history.nc``) at
+any desired location, use the ``to_netcdf()`` method on the returned
+``data_tree``:
+
+.. code-block:: python
+
+  # Save the simulation output to a specific location.
+  data_tree.to_netcdf('path/to/output_directory/state_history.nc')
+
 Plotting from an in-memory simulation
-######################################
+#####################################
 
 If you have already run a simulation and have a ``data_tree`` in memory, you can
 plot it directly without saving to a file first using
