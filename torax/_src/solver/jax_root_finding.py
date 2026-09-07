@@ -20,7 +20,7 @@ from typing import Callable, Final
 
 import jax
 import jax.numpy as jnp
-import numpy as np
+from torax._src import array_typing
 from torax._src import jax_utils
 from torax._src.solver import linesearch
 
@@ -28,6 +28,11 @@ from torax._src.solver import linesearch
 # the delta loop. This is to avoid getting stuck in an infinite loop in edge
 # cases with bad numerics.
 MIN_DELTA: Final[float] = 1e-7
+
+
+def _mean_abs_norm(x: array_typing.Array) -> jax.Array:
+  """Mean of the absolute values of the elements of x, used as the default norm function for the root finder."""
+  return jnp.mean(jnp.abs(x))
 
 
 @jax.tree_util.register_dataclass
@@ -41,7 +46,7 @@ class RootMetadata:
 
 def root_newton_raphson(
     fun: Callable[[jax.Array], jax.Array],
-    x0: jax.Array | np.ndarray,
+    x0: array_typing.Array,
     *,
     maxiter: int = 30,
     tol: float = 1e-5,
@@ -52,6 +57,8 @@ def root_newton_raphson(
     log_iterations: bool = False,
     use_jax_custom_root: bool = True,
     custom_jac: Callable[[jax.Array], jax.Array] | None = None,
+    linesearch_norm: Callable[[jax.Array], jax.Array] = _mean_abs_norm,
+    convergence_norm: Callable[[jax.Array], jax.Array] = _mean_abs_norm,
 ) -> tuple[jax.Array, RootMetadata]:
   """A differentiable Newton-Raphson root finder.
 
@@ -61,8 +68,7 @@ def root_newton_raphson(
     fun: The function to find the root of.
     x0: The initial guess of the location of the root.
     maxiter: Quit iterating after this many iterations reached.
-    tol: Quit iterating after the average absolute value of the residual is <=
-      tol.
+    tol: Quit iterating after convergence_norm(residual) <= tol.
     coarse_tol: Coarser allowed tolerance for cases when solver develops small
       steps in the vicinity of the solution.
     delta_reduction_factor: Multiply by delta_reduction_factor after each failed
@@ -78,13 +84,22 @@ def root_newton_raphson(
       derivatives are requested.
     custom_jac: If provided, use this function to compute the Jacobian of `fun`
       instead of jax.jacfwd.
+    linesearch_norm: Scalar norm function applied to residual vectors for line
+      search acceptance. Defaults to L1 norm.
+    convergence_norm: Scalar norm function applied to residual vectors for
+      outer loop convergence checks and error classification. Defaults to L1
+      norm.
 
   Returns:
     A tuple `(x_root, RootMetadata(...))`.
   """
 
-  def _newton_raphson(f, x, jacobian_fun=None):
-    init_x_new_vec = x
+  def _newton_raphson(
+      f: Callable[[jax.Array], jax.Array],
+      x: array_typing.Array,
+      jacobian_fun: Callable[[jax.Array], jax.Array] | None = None,
+  ) -> tuple[jax.Array, dict[str, jax.Array]]:
+    init_x_new_vec = jnp.asarray(x)
     residual_fun = f
 
     if jacobian_fun is None:
@@ -96,9 +111,11 @@ def root_newton_raphson(
         'x': init_x_new_vec,
         # jax.lax.custom_root is broken with aux outputs of integer type. Use
         # float for the iterations https://github.com/jax-ml/jax/issues/24295.
+        # TODO(b/558163533): Fixed in JAX > 0.11.1.
         'iterations': jnp.array(0, dtype=jax_utils.get_dtype()),
         'residual': residual_vec_init_x_new,
         'last_tau': jnp.array(1.0, dtype=jax_utils.get_dtype()),
+        'residual_norm': convergence_norm(residual_vec_init_x_new),
     }
 
     # carry out iterations.
@@ -112,6 +129,8 @@ def root_newton_raphson(
         log_iterations=log_iterations,
         delta_reduction_factor=delta_reduction_factor,
         sufficient_decrease=sufficient_decrease,
+        linesearch_norm=linesearch_norm,
+        convergence_norm=convergence_norm,
     )
     output_state = jax.lax.while_loop(cond_fun, body_fun, initial_state)
     x_out = output_state.pop('x')
@@ -126,7 +145,10 @@ def root_newton_raphson(
   # See also this discussion:
   # https://docs.jax.dev/en/latest/advanced-autodiff.html#example-implicit-function-differentiation-of-iterative-implementations
 
-  def back(g, y):
+  def back(
+      g: Callable[[jax.Array], jax.Array],
+      y: jax.Array,
+  ) -> jax.Array:
     return jnp.linalg.solve(jax.jacfwd(g)(y), y)
 
   if use_jax_custom_root:
@@ -142,38 +164,50 @@ def root_newton_raphson(
   else:
     x_out, metadata = _newton_raphson(fun, x0, jacobian_fun=custom_jac)
 
-  # Tell the caller whether or not x_new successfully reduces the residual below
-  # the tolerance by providing an extra output, error.
-  # error = 0: residual converged within fine tolerance (tol)
-  # error = 1: not converged. Possibly backtrack to smaller dt and retry
-  # error = 2: residual not strictly converged but is still within reasonable
-  # tolerance (coarse_tol). Can occur when solver exits early due to small steps
-  # in solution vicinity. Proceed but provide a warning to user.
-  error = _error_cond(
-      residual=metadata['residual'], coarse_tol=coarse_tol, tol=tol
+  # Error flag tells the caller whether x_new successfully reduces the residual
+  # below the tolerance.
+  error = _get_error_flag(
+      norm=metadata.pop('residual_norm'),
+      coarse_tol=coarse_tol,
+      tol=tol,
   )
   # Workaround for https://github.com/google/jax/issues/24295: cast iterations
   # to the correct int dtype.
+  # TODO(b/558163533): Fixed in JAX > 0.11.1.
   metadata['iterations'] = metadata['iterations'].astype(
       jax_utils.get_int_dtype()
   )
-  return x_out, RootMetadata(**metadata, error=error)  # pytype: disable=bad-return-type
+  return x_out, RootMetadata(**metadata, error=error)
 
 
-def _error_cond(residual: jax.Array, coarse_tol: float, tol: float):
+def _get_error_flag(
+    norm: jax.Array,
+    coarse_tol: float,
+    tol: float,
+) -> jax.Array:
+  """Computes the flag indicating whether a solve step converged.
+
+  Args:
+    norm: Scalar norm of the final residual vector.
+    coarse_tol: Coarser allowed tolerance for cases when solver exits early due
+      to small steps in the solution vicinity.
+    tol: Fine convergence tolerance.
+
+  Returns:
+    An integer scalar flag indicating the convergence status:
+      - 0: Residual converged within fine tolerance (`norm < tol`).
+      - 1: Not converged (`norm >= coarse_tol`).
+      - 2: Residual within reasonable tolerance (`norm < coarse_tol`).
+  """
   return jax.lax.cond(
-      _residual_scalar(residual) < tol,
-      lambda: 0,  # Called when True
-      lambda: jax.lax.cond(  # Called when False
-          _residual_scalar(residual) < coarse_tol,
-          lambda: 2,  # Called when True
-          lambda: 1,  # Called when False
+      norm < tol,
+      lambda: 0,
+      lambda: jax.lax.cond(
+          norm < coarse_tol,
+          lambda: 2,  # tol < norm < coarse_tol
+          lambda: 1,  # norm > coarse_tol
       ),
   )
-
-
-def _residual_scalar(x):
-  return jnp.mean(jnp.abs(x))
 
 
 def _cond(
@@ -186,9 +220,7 @@ def _cond(
   iteration = state['iterations'][...]
   return jnp.bool_(
       jnp.logical_and(
-          jnp.logical_and(
-              _residual_scalar(state['residual']) > tol, iteration < maxiter
-          ),
+          jnp.logical_and(state['residual_norm'] > tol, iteration < maxiter),
           state['last_tau'] > tau_min,
       )
   )
@@ -201,22 +233,20 @@ def _body(
     log_iterations: bool,
     delta_reduction_factor: float,
     sufficient_decrease: float,
+    linesearch_norm: Callable[[jax.Array], jax.Array],
+    convergence_norm: Callable[[jax.Array], jax.Array],
 ) -> dict[str, jax.Array]:
   """Calculates next guess in Newton-Raphson iteration."""
-  dtype = input_state['x'].dtype
-  a_mat = jacobian_fun(input_state['x'])
   rhs = -input_state['residual']
+  init_ls_norm = linesearch_norm(input_state['residual'])
+
+  a_mat = jacobian_fun(input_state['x'])
 
   direction = jnp.linalg.solve(a_mat, rhs)
 
-  def norm_fn(res):
-    return jnp.mean(jnp.abs(res))
-
-  init_norm = norm_fn(input_state['residual'])
-
   def accept_fn(step_size, trial_norm):
     return (
-        trial_norm <= (1.0 - sufficient_decrease * step_size) * init_norm
+        trial_norm <= (1.0 - sufficient_decrease * step_size) * init_ls_norm
     ) & (~jnp.isnan(trial_norm))
 
   ls_state = linesearch.backtracking_linesearch(
@@ -224,9 +254,9 @@ def _body(
       x_init=input_state['x'],
       direction=direction,
       accept_fn=accept_fn,
-      norm_fn=norm_fn,
+      norm_fn=linesearch_norm,
       initial_residual=input_state['residual'],
-      initial_residual_norm=init_norm,
+      initial_residual_norm=init_ls_norm,
       delta_reduction_factor=delta_reduction_factor,
       max_steps=100,
       min_step_norm=MIN_DELTA,
@@ -235,15 +265,16 @@ def _body(
   output_state = {
       'x': ls_state.x,
       'residual': ls_state.residual,
-      'iterations': jnp.array(input_state['iterations'][...], dtype=dtype) + 1,
+      'iterations': input_state['iterations'] + 1,
       'last_tau': ls_state.step_size,
+      'residual_norm': convergence_norm(ls_state.residual),
   }
 
   if log_iterations:
     jax.debug.print(
         'Iteration: {iteration:d}. Residual: {residual:.16f}. tau = {tau:.6f}',
         iteration=output_state['iterations'].astype(jax_utils.get_int_dtype()),
-        residual=_residual_scalar(output_state['residual']),
+        residual=output_state['residual_norm'],
         tau=ls_state.step_size,
     )
 

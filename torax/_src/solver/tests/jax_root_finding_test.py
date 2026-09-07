@@ -99,6 +99,26 @@ class NewtonRaphsonSolveBlockTest(parameterized.TestCase):
       chex.assert_trees_all_close(a_grad, a_grad_diff, atol=1e-4)
       chex.assert_trees_all_close(b_grad, b_grad_diff, atol=1e-4)
 
+  def test_root_newton_raphson_separate_norms(self):
+    f_closed = functools.partial(function_to_find_root, a=0.5, b=0.1)
+    x_init = np.array((0.0, 0.0), dtype=np.float64)
+    sol_np = optimize.root(f_closed, x_init, tol=1e-9)
+
+    # Use L2 norm for linesearch and Linf norm for convergence.
+    linesearch_norm = lambda x: jnp.sqrt(jnp.sum(x**2))
+    convergence_norm = lambda x: jnp.max(jnp.abs(x))
+
+    sol_jax, metadata = jax_root_finding.root_newton_raphson(
+        f_closed,
+        x_init,
+        tol=1e-9,
+        maxiter=100,
+        linesearch_norm=linesearch_norm,
+        convergence_norm=convergence_norm,
+    )
+    chex.assert_trees_all_close(sol_np.x, sol_jax, atol=1e-9)
+    self.assertEqual(int(metadata.error), 0)
+
 
 if __name__ == '__main__':
   absltest.main()
