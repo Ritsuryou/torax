@@ -416,7 +416,7 @@ class PostProcessedOutputs:
         j_generic_current=jnp.zeros(geo.rho_face.shape),
         j_ecrh=jnp.zeros(geo.rho_face.shape),
         j_non_inductive=jnp.zeros(geo.rho_face.shape),
-        j_parallel_external=jnp.zeros(geo.rho_face.shape),
+        j_parallel_external=jnp.zeros(geo.rho.shape),
         j_parallel_non_inductive=jnp.zeros(geo.rho_face.shape),
         I_external=jnp.array(0.0, dtype=jax_utils.get_dtype()),
         I_non_inductive=jnp.array(0.0, dtype=jax_utils.get_dtype()),
@@ -864,7 +864,10 @@ def make_post_processed_outputs(
   j_parallel_bootstrap = (
       sim_state.core_sources.bootstrap_current.j_parallel_bootstrap
   )
-  j_parallel_external = sum(sim_state.core_sources.psi.values())
+  j_parallel_external = sum(
+      sim_state.core_sources.psi.values(),
+      jnp.zeros(sim_state.geometry.rho.shape),
+  )
   j_parallel_ohmic = (
       j_parallel_total - j_parallel_external - j_parallel_bootstrap
   )
